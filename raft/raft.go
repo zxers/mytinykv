@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	"math/rand"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
@@ -157,6 +158,11 @@ type Raft struct {
 	// value.
 	// (Used in 3A conf change)
 	PendingConfIndex uint64
+
+	//-------------self add ------------------//
+	peers []uint64
+	agreeCount uint64
+	randElectionTimeout int
 }
 
 // newRaft return a raft peer with the given config
@@ -165,13 +171,32 @@ func newRaft(c *Config) *Raft {
 		panic(err.Error())
 	}
 	// Your Code Here (2A).
-	return nil
+
+	return &Raft{
+		Term: 0,
+		Vote: 0,
+		id : c.ID,
+		heartbeatTimeout: c.HeartbeatTick,
+		electionTimeout: c.ElectionTick,
+		randElectionTimeout: c.ElectionTick,
+		RaftLog: newLog(c.Storage),
+		State: StateFollower,
+		peers: c.peers,
+		heartbeatElapsed: 0,
+		electionElapsed: 0,
+		votes: make(map[uint64]bool),
+		Prs: make(map[uint64]*Progress),
+	}
 }
 
 // sendAppend sends an append RPC with new entries (if any) and the
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType: pb.MessageType_MsgAppend,
+		Entries: r.RaftLog.entries,
+	})
 	return false
 }
 
@@ -183,22 +208,80 @@ func (r *Raft) sendHeartbeat(to uint64) {
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
 	// Your Code Here (2A).
+	switch r.State{
+	case StateFollower:
+		r.tickElection()
+	case StateCandidate:
+		r.tickElection()
+	case StateLeader:
+		r.tickHeartbeat()
+	}
+}
+
+func (r *Raft) tickHeartbeat() {
+	r.heartbeatElapsed++
+	if(r.heartbeatElapsed == r.heartbeatTimeout) {
+		r.heartbeatElapsed = 0
+		for _, to := range r.peers {
+			if to != r.id {
+				r.msgs = append(r.msgs, pb.Message{
+					From: r.id,
+					To: to,
+					Term: r.Term,
+					MsgType: pb.MessageType_MsgHeartbeat,
+				})
+			}
+		}
+	}
+}
+
+func (r *Raft) tickElection() {
+	r.electionElapsed++
+	if r.electionElapsed == r.randElectionTimeout {
+		r.electionElapsed = 0
+		r.randElectionTimeout = r.electionTimeout + rand.Intn(r.electionTimeout)
+		r.becomeCandidate()
+		for _, to := range r.peers {
+			if r.id != to {
+				r.msgs = append(r.msgs, pb.Message{
+					From: r.id,
+					To: to,
+					Term: r.Term,
+					MsgType: pb.MessageType_MsgRequestVote,
+				})
+			}
+		}
+	}
 }
 
 // becomeFollower transform this peer's state to Follower
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
+	r.Lead = lead
+	r.Term = term
+	r.State = StateFollower
 	// Your Code Here (2A).
 }
 
 // becomeCandidate transform this peer's state to candidate
 func (r *Raft) becomeCandidate() {
 	// Your Code Here (2A).
+	r.Term++
+	r.State = StateCandidate
+	r.votes[r.id] = true
+	r.Vote = r.id
+	r.agreeCount++
+	if len(r.peers) <= 1 {
+		r.becomeLeader()
+	}
 }
 
 // becomeLeader transform this peer's state to leader
 func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// NOTE: Leader should propose a noop entry on its term
+	r.State = StateLeader
+	r.RaftLog.entries = append(r.RaftLog.entries, pb.Entry{})
+
 }
 
 // Step the entrance of handle message, see `MessageType`
@@ -207,9 +290,66 @@ func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
 	switch r.State {
 	case StateFollower:
+		if r.Term < m.Term {
+			r.Term = m.Term
+		}
+		r.followerhandler(m)
 	case StateCandidate:
+		if r.Term < m.Term {
+			r.Term = m.Term
+			r.State = StateFollower
+		}
+		r.candidatehandler(m)
 	case StateLeader:
+		if r.Term < m.Term {
+			r.Term = m.Term
+			r.State = StateFollower
+		}
 	}
+	return nil
+}
+
+func (r *Raft) followerhandler(m pb.Message) error {
+	switch m.MsgType{
+	case pb.MessageType_MsgHup:
+		r.becomeCandidate()
+	case pb.MessageType_MsgRequestVote:
+		var reject bool
+		if r.Vote == None || r.Vote == m.From {
+			reject = false
+		} else {
+			reject = true
+		}
+		r.msgs = append(r.msgs, pb.Message{
+			From: r.id,
+			To: m.From,
+			Term: r.Term,
+			MsgType: pb.MessageType_MsgRequestVoteResponse,
+			Reject:  reject,
+		})
+	}
+	return nil
+}
+
+func (r *Raft) candidatehandler(m pb.Message) error {
+	switch m.MsgType{
+	case pb.MessageType_MsgHup:
+		r.becomeCandidate()
+	case pb.MessageType_MsgRequestVoteResponse:
+		if(!m.Reject) {
+			r.votes[m.From] = true
+			r.agreeCount++
+		}
+		if(r.agreeCount > uint64(len(r.peers)) / 2) {
+			r.agreeCount = 0
+			r.becomeLeader()
+		}	
+	case pb.MessageType_MsgAppend:
+		if m.Term >= r.Term {
+			r.becomeFollower(m.Term, m.From)
+		}
+	}
+	
 	return nil
 }
 
