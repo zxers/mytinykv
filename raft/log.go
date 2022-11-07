@@ -50,14 +50,25 @@ type RaftLog struct {
 	pendingSnapshot *pb.Snapshot
 
 	// Your Data Here (2A).
+	first uint64
 }
 
 // newLog returns log using the given storage. It recovers the log
 // to the state that it just commits and applies the latest snapshot.
 func newLog(storage Storage) *RaftLog {
 	// Your Code Here (2A).
+	firstIndex, _ := storage.FirstIndex()
+	lastIndex, _ := storage.LastIndex()
+	entries, _ := storage.Entries(firstIndex, lastIndex + 1)
+	hardstate, _, _ := storage.InitialState()
 	return &RaftLog{
 		storage: storage,
+		committed: hardstate.Commit,
+		first: firstIndex,
+		applied: firstIndex - 1,
+		stabled: lastIndex,
+		entries: entries,
+		pendingSnapshot: nil,
 	}
 }
 
@@ -73,29 +84,33 @@ func (l *RaftLog) maybeCompact() {
 // note, this is one of the test stub functions you need to implement.
 func (l *RaftLog) allEntries() []pb.Entry {
 	// Your Code Here (2A).
-	return nil
+	return l.entries[l.first - 1:]
 }
 
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
-	return nil
+
+	return l.entries[l.stabled - l.first + 1:]
 }
 
 // nextEnts returns all the committed but not applied entries
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	// Your Code Here (2A).
-	return nil
+	return l.entries[l.applied-l.first+1 : l.committed-l.first+1]
 }
 
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
-	return 0
+	return l.first + uint64(len(l.entries)) - 1
 }
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
-	return 0, nil
+	if i == 0 {
+		return 0, nil
+	}
+	return l.entries[i - l.first].Term, nil
 }
